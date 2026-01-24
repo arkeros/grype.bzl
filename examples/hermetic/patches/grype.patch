@@ -1,0 +1,19 @@
+diff --git a/grype/db/embed/BUILD.bazel b/grype/db/embed/BUILD.bazel
+new file mode 100644
+index 0000000..e5b2a2d
+--- /dev/null
++++ b/grype/db/embed/BUILD.bazel
+@@ -0,0 +1,13 @@
++load("@rules_go//go:def.bzl", "go_library")
++
++go_library(
++    name = "embed",
++    srcs = ["embed.go"],
++    embedsrcs = ["listing.json"],
++    importpath = "github.com/anchore/grype/grype/db/embed",
++    visibility = ["//visibility:public"],
++    deps = [
++        "//grype/db/distribution",
++        "@com_github_anchore_clio//:clio",
++    ],
++)

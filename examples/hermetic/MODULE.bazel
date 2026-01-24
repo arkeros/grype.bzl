@@ -1,0 +1,114 @@
+"""Hermetic example: compiled grype binary and pinned vulnerability database."""
+
+module(
+    name = "grype_hermetic_example",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "grype.bzl", version = "0.0.0")
+local_path_override(
+    module_name = "grype.bzl",
+    path = "../..",
+)
+
+# Also need syft.bzl for generating SBOMs
+bazel_dep(name = "syft.bzl", version = "0.0.0")
+local_path_override(
+    module_name = "syft.bzl",
+    path = "../../../syft.bzl",
+)
+
+# NOTE: This example compiles grype from Go source and registers it as a toolchain.
+# See BUILD file for the toolchain definition.
+register_toolchains("//:grype_toolchain")
+
+# Register syft toolchain
+syft = use_extension("@syft.bzl//syft:extensions.bzl", "syft")
+syft.toolchain(version = "1.40.1")
+use_repo(syft, "syft_toolchains")
+
+register_toolchains("@syft_toolchains//:all")
+
+# Hermetic vulnerability database
+grype_database = use_extension("@grype.bzl//grype:extensions.bzl", "grype_database")
+grype_database.database(
+    name = "grype_db",
+    sha256 = "c96b7615e93b28c3f2d9df6d7b774d62a9b2c4a4f0bfd43a75d6d6b68e41b292",
+    url = "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.3_2026-01-20T00:30:04Z_1768889878.tar.zst",
+)
+use_repo(grype_database, "grype_db")
+
+# rules_img for building OCI images
+bazel_dep(name = "rules_img", version = "0.3.3")
+
+# Go toolchain for compiling grype
+bazel_dep(name = "rules_go", version = "0.59.0")
+bazel_dep(name = "gazelle", version = "0.47.0")
+
+# Dev environment for local tooling (go, gazelle, etc.)
+bazel_dep(name = "lazy_bazel_env.bzl", version = "0.0.0")
+git_override(
+    module_name = "lazy_bazel_env.bzl",
+    commit = "55685e5",
+    remote = "https://github.com/arkeros/lazy_bazel_env.bzl.git",
+)
+
+# Configure Go SDK
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.from_file(go_mod = "//:go.mod")
+
+# Import Go dependencies from go.mod
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//:go.mod")
+
+# Disable proto generation for cel.dev/expr to avoid java_proto_library/cc_proto_library errors
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    directives = [
+        "gazelle:proto disable",
+    ],
+    path = "cel.dev/expr",
+)
+
+# All *direct* Go dependencies must be listed explicitly
+use_repo(
+    go_deps,
+    "com_github_anchore_grype",
+    "com_github_anchore_syft",
+)
+
+# Apply patch to grype to fix Bazel BUILD files for embedded resources
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//patches:grype.patch"],
+    path = "github.com/anchore/grype",
+)
+
+# Apply patch to syft to fix Bazel BUILD files for embedded resources
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//patches:syft.patch"],
+    path = "github.com/anchore/syft",
+)
+
+# Pull base images
+pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+
+# Alpine Linux (linux/arm64)
+pull(
+    name = "alpine_linux_arm64",
+    digest = "sha256:410dabcd6f1d53f1f4e5c1ce9553efa298ca6bcdd086dfc976b8f659d58b46d2",
+    layer_handling = "lazy",
+    registry = "index.docker.io",
+    repository = "library/alpine",
+)
+
+# Alpine Linux (linux/amd64)
+pull(
+    name = "alpine_linux_amd64",
+    digest = "sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+    layer_handling = "lazy",
+    registry = "index.docker.io",
+    repository = "library/alpine",
+)

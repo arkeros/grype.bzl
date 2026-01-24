@@ -1,0 +1,63 @@
+"""Simple example using grype.bzl with pre-built toolchain."""
+
+module(
+    name = "grype_simple_example",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "grype.bzl", version = "0.0.0")
+local_path_override(
+    module_name = "grype.bzl",
+    path = "../..",
+)
+
+# Also need syft.bzl for generating SBOMs to scan
+bazel_dep(name = "syft.bzl", version = "0.0.0")
+local_path_override(
+    module_name = "syft.bzl",
+    path = "../../../syft.bzl",
+)
+
+# Register grype toolchain
+grype = use_extension("@grype.bzl//grype:extensions.bzl", "grype")
+grype.toolchain(version = "0.105.0")
+use_repo(grype, "grype_toolchains")
+register_toolchains("@grype_toolchains//:all")
+
+# Register syft toolchain for SBOM generation
+syft = use_extension("@syft.bzl//syft:extensions.bzl", "syft")
+syft.toolchain(version = "1.40.1")
+use_repo(syft, "syft_toolchains")
+register_toolchains("@syft_toolchains//:all")
+
+# rules_img for building OCI images
+bazel_dep(name = "rules_img", version = "0.3.3")
+
+# jq for grype_test filtering
+bazel_dep(name = "jq.bzl", version = "0.4.0")
+
+jq_toolchains = use_extension("@jq.bzl//jq:extensions.bzl", "toolchains")
+use_repo(jq_toolchains, "jq_toolchains")
+register_toolchains("@jq_toolchains//:all")
+
+# Pull base images
+pull = use_repo_rule("@rules_img//img:pull.bzl", "pull")
+
+# Alpine Linux (linux/arm64)
+pull(
+    name = "alpine_linux_arm64",
+    digest = "sha256:410dabcd6f1d53f1f4e5c1ce9553efa298ca6bcdd086dfc976b8f659d58b46d2",
+    layer_handling = "lazy",
+    registry = "index.docker.io",
+    repository = "library/alpine",
+)
+
+# Alpine Linux (linux/amd64)
+pull(
+    name = "alpine_linux_amd64",
+    digest = "sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+    layer_handling = "lazy",
+    registry = "index.docker.io",
+    repository = "library/alpine",
+)
