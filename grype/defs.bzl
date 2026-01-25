@@ -190,7 +190,7 @@ using [Grype](https://github.com/anchore/grype).
 
 Example (scan SBOM):
     ```starlark
-    load("@grype.bzl//grype:defs.bzl", "grype_scan")
+    load("@grype.bzl", "grype_scan")
 
     grype_scan(
         name = "vuln_report",
@@ -241,7 +241,7 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
 
     Example:
         ```starlark
-        load("@grype.bzl//grype:defs.bzl", "grype_scan", "grype_test")
+        load("@grype.bzl", "grype_scan", "grype_test")
 
         grype_scan(
             name = "vuln_report",

@@ -5,9 +5,9 @@
 # - Scanning the SBOM for vulnerabilities with grype
 # - Scanning an OCI image directly with grype
 
-load("@grype.bzl//grype:defs.bzl", "grype_scan", "grype_test")
+load("@grype.bzl", "grype_scan", "grype_test")
 load("@rules_img//img:image.bzl", "image_manifest")
-load("@syft.bzl//syft:defs.bzl", "syft_sbom")
+load("@syft.bzl", "syft_sbom")
 
 # Create a simple image based on Alpine Linux
 image_manifest(
@@ -54,14 +54,14 @@ grype_scan(
 # This creates a proper test target that can be run with `bazel test`
 grype_test(
     name = "vuln_test",
-    scan_result = ":vuln_report",
     fail_on_severity = "high",
+    scan_result = ":vuln_report",
 )
 
 # Test with ignored CVEs (for known false positives or accepted risks)
 grype_test(
     name = "vuln_test_with_ignores",
-    scan_result = ":vuln_report",
     fail_on_severity = "critical",
     ignore_cves = ["CVE-2024-0000"],  # Example: known false positive
+    scan_result = ":vuln_report",
 )

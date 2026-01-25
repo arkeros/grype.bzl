@@ -5,10 +5,9 @@
 # - Using a pinned vulnerability database (no network at scan time)
 # - Full reproducibility with all inputs tracked by Bazel
 
-load("@grype.bzl//grype:defs.bzl", "grype_scan")
-load("@grype.bzl//grype/toolchain:toolchain.bzl", "grype_toolchain")
+load("@grype.bzl", "grype_scan", "grype_toolchain")
 load("@rules_img//img:image.bzl", "image_manifest")
-load("@syft.bzl//syft:defs.bzl", "syft_sbom")
+load("@syft.bzl", "syft_sbom")
 
 # Define a grype toolchain using the compiled binary
 grype_toolchain(
