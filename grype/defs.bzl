@@ -1,7 +1,10 @@
-"""Grype vulnerability scanning rules."""
+"""Grype vulnerability scanning rules and aspect."""
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@jq.bzl", "jq")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@syft.bzl//syft:defs.bzl", "SyftSBOMInfo", "syft_sbom_aspect")
+load("//grype:cve_policy.bzl", "CvePolicyInfo")
 
 # Transition to build inputs for Linux (OCI images require Linux)
 def _linux_transition_impl(settings, attr):
@@ -43,18 +46,62 @@ _FORMAT_EXTENSIONS = {
     "sarif": "sarif.json",
 }
 
+GrypeScanInfo = provider(
+    doc = "Grype vulnerability scan results, propagated by grype_aspect.",
+    fields = {
+        "report": "File containing the JSON scan report",
+    },
+)
+
+# ---------- Shared helpers ----------
+
+def _get_grype_binary(ctx):
+    """Get grype binary from explicit attr or toolchain."""
+    if hasattr(ctx.attr, "grype") and ctx.attr.grype:
+        return ctx.executable.grype
+    toolchain_info = ctx.toolchains["@grype.bzl//grype:toolchain"]
+    if not toolchain_info:
+        return None
+    return toolchain_info.grype_info.grype_binary
+
+def _db_setup_commands(database_files):
+    """Generate shell commands for database setup.
+
+    Args:
+        database_files: List of Files from the database target, or empty list.
+
+    Returns:
+        Tuple of (shell_commands_string, list_of_input_files).
+    """
+    db_dir = None
+    for f in database_files:
+        if f.is_directory:
+            db_dir = f
+            break
+
+    if db_dir:
+        return ("""
+# Create directory structure grype expects: cache_dir/6/
+GRYPE_CACHE_DIR=$(mktemp -d)
+mkdir -p "$GRYPE_CACHE_DIR/6"
+ln -s "$PWD/{db_dir}"/* "$GRYPE_CACHE_DIR/6/"
+export GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR"
+export GRYPE_DB_AUTO_UPDATE=false
+""".format(db_dir = db_dir.path), [db_dir])
+
+    return ("""
+export GRYPE_DB_CACHE_DIR=$(mktemp -d)
+""", [])
+
+# ---------- Rule: grype_scan ----------
+
 def _grype_scan_impl(ctx):
     """Run grype vulnerability scan."""
     output = ctx.outputs.report
 
-    # Get grype binary from explicit attr or toolchain
-    if ctx.attr.grype:
-        grype = ctx.executable.grype
-    else:
-        toolchain_info = ctx.toolchains["@grype.bzl//grype:toolchain"]
-        if not toolchain_info:
-            fail("No grype toolchain found. Either set the 'grype' attribute or register the grype toolchain.")
-        grype = toolchain_info.grype_info.grype_binary
+    grype = _get_grype_binary(ctx)
+    if grype == None:
+        fail("No grype toolchain found. Either set the 'grype' attribute or register the grype toolchain.")
 
     # Determine input source: SBOM file or OCI image tarball
     if ctx.attr.sbom:
@@ -88,33 +135,8 @@ def _grype_scan_impl(ctx):
         fail_on_flag = "--fail-on " + ctx.attr.fail_on
 
     # Handle database setup
-    db_setup = ""
-    if ctx.attr.database:
-        # Find the database directory from the database target
-        db_dir = None
-        for f in ctx.files.database:
-            if f.is_directory:
-                db_dir = f
-                break
-
-        if db_dir:
-            inputs.append(db_dir)
-            db_setup = """
-# Create directory structure grype expects: cache_dir/6/
-GRYPE_CACHE_DIR=$(mktemp -d)
-mkdir -p "$GRYPE_CACHE_DIR/6"
-ln -s "$PWD/{db_dir}"/* "$GRYPE_CACHE_DIR/6/"
-export GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR"
-export GRYPE_DB_AUTO_UPDATE=false
-""".format(db_dir = db_dir.path)
-        else:
-            db_setup = """
-export GRYPE_DB_CACHE_DIR=$(mktemp -d)
-"""
-    else:
-        db_setup = """
-export GRYPE_DB_CACHE_DIR=$(mktemp -d)
-"""
+    db_commands, db_inputs = _db_setup_commands(ctx.files.database if ctx.attr.database else [])
+    inputs.extend(db_inputs)
 
     ctx.actions.run_shell(
         inputs = inputs,
@@ -126,7 +148,7 @@ export GRYPE_CHECK_FOR_APP_UPDATE=false
 {db_setup}
 {grype} {input} -o {format} --file {output} {fail_on_flag}
 """.format(
-            db_setup = db_setup,
+            db_setup = db_commands,
             grype = grype.path,
             input = input_arg,
             format = format,
@@ -209,6 +231,8 @@ Example (scan image directly):
     ```
 """,
 )
+
+# ---------- Macro: grype_test ----------
 
 # jq filter to extract vulnerabilities at or above a severity threshold
 # Returns JSON array with CVE id, severity, package name/version, and fix info
@@ -293,3 +317,166 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
         args = ["$(location :" + jq_name + ")", fail_on_severity],
         **kwargs
     )
+
+# ---------- Aspect: grype_aspect ----------
+
+_JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
+
+def _build_jq_filter(fail_on_severity, ignore_cves):
+    """Build jq filter for the aspect validation action."""
+    severities = _severity_list(fail_on_severity)
+    if ignore_cves:
+        cve_list = ", ".join(['"%s"' % cve for cve in ignore_cves])
+        return _JQ_FILTER_TEMPLATE.format(
+            severities = severities,
+            ignore_cves = cve_list,
+        )
+    return _JQ_FILTER_NO_IGNORE_TEMPLATE.format(severities = severities)
+
+def _grype_aspect_impl(target, ctx):
+    """Aspect that scans OCI images for vulnerabilities via grype."""
+
+    # Only process targets that have an SBOM (from syft_sbom_aspect via requires)
+    if SyftSBOMInfo not in target:
+        return []
+
+    sbom = target[SyftSBOMInfo].sbom
+
+    # Get grype binary from toolchain
+    toolchain_info = ctx.toolchains["@grype.bzl//grype:toolchain"]
+    if not toolchain_info:
+        return []
+    grype = toolchain_info.grype_info.grype_binary
+
+    # Read policy from build settings
+    fail_on_severity = ctx.attr._fail_on_severity[BuildSettingInfo].value
+    ignore_cves_value = ctx.attr._ignore_cves[BuildSettingInfo].value
+    ignore_cves = [c for c in ignore_cves_value if c] if ignore_cves_value else []
+
+    # Check for per-target CvePolicyInfo override (via aspect_hints)
+    for hint in (ctx.rule.attr.aspect_hints if hasattr(ctx.rule.attr, "aspect_hints") else []):
+        if CvePolicyInfo in hint:
+            fail_on_severity = hint[CvePolicyInfo].fail_on_severity
+            ignore_cves = hint[CvePolicyInfo].ignore_cves
+            break
+
+    # Handle database setup
+    db_files = ctx.attr._database.files.to_list() if ctx.attr._database else []
+    db_commands, db_inputs = _db_setup_commands(db_files)
+
+    # Action 1: Scan → JSON report (always succeeds)
+    report = ctx.actions.declare_file("{}.grype.json".format(target.label.name))
+    scan_inputs = [sbom] + db_inputs
+    ctx.actions.run_shell(
+        inputs = scan_inputs,
+        outputs = [report],
+        tools = [grype],
+        command = """
+set -euo pipefail
+export GRYPE_CHECK_FOR_APP_UPDATE=false
+{db_setup}
+{grype} sbom:"$PWD/{sbom}" -o json --file {output}
+""".format(
+            db_setup = db_commands,
+            grype = grype.path,
+            sbom = sbom.path,
+            output = report.path,
+        ),
+        mnemonic = "GrypeScan",
+        progress_message = "Scanning for vulnerabilities for %s" % target.label,
+    )
+
+    # Action 2: Filter violations with jq
+    jq_bin = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
+    jq_filter = _build_jq_filter(fail_on_severity, ignore_cves)
+    violations = ctx.actions.declare_file("{}.grype_violations.json".format(target.label.name))
+    ctx.actions.run_shell(
+        inputs = [report],
+        outputs = [violations],
+        tools = [jq_bin],
+        command = """{jq} '{filter}' {input} > {output}""".format(
+            jq = jq_bin.path,
+            filter = jq_filter.strip(),
+            input = report.path,
+            output = violations.path,
+        ),
+        mnemonic = "GrypeFilter",
+        progress_message = "Filtering vulnerabilities for %s" % target.label,
+    )
+
+    # Action 3: Validate → marker file (fails if violations found)
+    check_sh = ctx.attr._check_sh.files.to_list()[0]
+    validation = ctx.actions.declare_file("{}.grype_validation".format(target.label.name))
+    ctx.actions.run_shell(
+        inputs = [violations, check_sh],
+        outputs = [validation],
+        command = """
+set -euo pipefail
+bash {check} "{violations}" "{severity}"
+touch {marker}
+""".format(
+            check = check_sh.path,
+            violations = violations.path,
+            severity = fail_on_severity,
+            marker = validation.path,
+        ),
+        mnemonic = "GrypeValidate",
+        progress_message = "Validating CVE policy for %s" % target.label,
+    )
+
+    return [
+        GrypeScanInfo(report = report),
+        OutputGroupInfo(
+            cve_scan = depset([report]),
+            _validation = depset([validation]),
+        ),
+    ]
+
+grype_aspect = aspect(
+    implementation = _grype_aspect_impl,
+    attr_aspects = [],
+    requires = [syft_sbom_aspect],
+    attrs = {
+        "_fail_on_severity": attr.label(
+            default = Label("@grype.bzl//grype:fail_on_severity"),
+        ),
+        "_ignore_cves": attr.label(
+            default = Label("@grype.bzl//grype:ignore_cves"),
+        ),
+        "_database": attr.label(
+            default = Label("@grype.bzl//grype:database"),
+        ),
+        "_check_sh": attr.label(
+            default = Label("@grype.bzl//grype:grype_check.sh"),
+            allow_single_file = True,
+        ),
+    },
+    toolchains = [
+        config_common.toolchain_type("@grype.bzl//grype:toolchain", mandatory = False),
+        config_common.toolchain_type(_JQ_TOOLCHAIN_TYPE, mandatory = False),
+    ],
+    doc = """Aspect that auto-scans OCI images for vulnerabilities using Grype.
+
+Requires syft_sbom_aspect (automatically chained via `requires`).
+No-ops on targets without SyftSBOMInfo.
+
+Wire in .bazelrc:
+    build --aspects=@grype.bzl//grype:defs.bzl%grype_aspect
+
+Configuration:
+    Global (build settings):
+        --@grype.bzl//grype:fail_on_severity=high
+        --@grype.bzl//grype:ignore_cves=CVE-2024-1234,CVE-2024-5678
+        --@grype.bzl//grype:database=@grype_database
+
+    Per-target (via aspect_hints):
+        Add a cve_policy() target as an aspect_hint to override global settings.
+
+Provides:
+    - GrypeScanInfo: with the JSON scan report
+    - OutputGroupInfo: 'cve_scan' (report) and '_validation' (pass/fail marker)
+
+The '_validation' output group integrates with --run_validations to
+fail builds when CVE policy is violated.
+""",
+)

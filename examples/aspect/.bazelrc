@@ -1,0 +1,10 @@
+# Attach syft_sbom_aspect first (produces 'sbom' output group)
+build --aspects=@syft.bzl//syft:defs.bzl%syft_sbom_aspect
+# Then grype_aspect (reads 'sbom' output group, produces 'cve_scan' + '_validation')
+build --aspects=@grype.bzl//grype:defs.bzl%grype_aspect
+
+# Enforce CVE policy during builds
+build --run_validations
+
+# Global severity threshold
+build --@grype.bzl//grype:fail_on_severity=high

@@ -16,6 +16,7 @@ bzl_library(
     srcs = ["grype.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "//grype:cve_policy",
         "//grype:defs",
         "//grype/toolchain",
     ],

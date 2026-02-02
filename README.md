@@ -76,6 +76,58 @@ grype_test(
 )
 ```
 
+### Aspect: `grype_aspect` (recommended)
+
+Auto-scan all OCI images for vulnerabilities via aspects. No per-target rules needed.
+
+Add to `.bazelrc`:
+
+```
+build --aspects=@syft.bzl//syft:defs.bzl%syft_sbom_aspect
+build --aspects=@grype.bzl//grype:defs.bzl%grype_aspect
+build --run_validations
+build --@grype.bzl//grype:fail_on_severity=high
+build --@grype.bzl//grype:database=@grype_database
+```
+
+Both aspects must be listed. `syft_sbom_aspect` (from [`syft.bzl`](https://github.com/arkeros/syft.bzl)) produces the `sbom` output group that `grype_aspect` consumes.
+
+```bash
+bazel build //my/image                                          # Full pipeline
+bazel build //my/image --output_groups=sbom                     # Just SBOM
+bazel build //my/image --output_groups=cve_scan                 # Just scan report
+bazel build //my/image --@grype.bzl//grype:fail_on_severity=critical  # Override threshold
+```
+
+#### Per-target CVE policy
+
+Override global settings for specific images using `cve_policy` and `aspect_hints`:
+
+```starlark
+load("@grype.bzl//grype:cve_policy.bzl", "cve_policy")
+load("@rules_img//img:image.bzl", "image_manifest")
+
+cve_policy(
+    name = "my_image_cve_policy",
+    fail_on_severity = "critical",
+    ignore_cves = ["CVE-2025-15281"],
+)
+
+image_manifest(
+    name = "my_image",
+    base = "@debian",
+    aspect_hints = [":my_image_cve_policy"],
+)
+```
+
+#### Build settings
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--@grype.bzl//grype:fail_on_severity` | string | `high` | Minimum severity to fail on |
+| `--@grype.bzl//grype:ignore_cves` | string list | `[]` | CVE IDs to ignore globally |
+| `--@grype.bzl//grype:database` | label | none | Pinned vulnerability database |
+
 ## Output Formats
 
 | Format | Extension | Description |
@@ -100,7 +152,8 @@ For `fail_on` and `fail_on_severity`:
 
 See the [`examples/`](examples/) directory:
 
-- [`examples/simple/`](examples/simple/) - Quick start with pre-built binaries
+- [`examples/simple/`](examples/simple/) - Quick start with rules
+- [`examples/aspect/`](examples/aspect/) - Aspect-based scanning with per-target CVE policy
 - [`examples/hermetic/`](examples/hermetic/) - Fully reproducible builds with compiled grype and pinned database
 
 ## License
