@@ -1,23 +1,26 @@
 #!/bin/bash
-# Check grype violations JSON - fails if any vulnerabilities found
+# Check grype JSON results - fails if any entries found.
+#
+# Usage:
+#   grype_check.sh <file> <severity>   — violation mode (CVEs above threshold)
+#   grype_check.sh <file>              — stale ignore mode (ignored CVEs no longer in scan)
 set -euo pipefail
 
-VIOLATIONS_FILE="$1"
-FAIL_ON="$2"
+FILE="$1"
+MODE="${2:-stale}"
 
-if [[ ! -f "$VIOLATIONS_FILE" ]]; then
-    echo "ERROR: Violations file not found: $VIOLATIONS_FILE"
+if [[ ! -f "$FILE" ]]; then
+    echo "ERROR: Results file not found: $FILE"
     exit 1
 fi
 
-# Check if array is empty (no violations)
-# Count occurrences of "id" in JSON
+# Count entries in JSON array (matches both object and string elements)
 set +e
-COUNT=$(grep -c '"id"' "$VIOLATIONS_FILE" 2>/dev/null)
+COUNT=$(grep -c '"CVE-' "$FILE" 2>/dev/null)
 GREP_EXIT=$?
 set -e
 
-# grep returns 1 if no match, but that's ok - count will be 0
+# grep returns 1 if no match - count will be 0
 if [[ $GREP_EXIT -eq 1 ]]; then
     COUNT=0
 elif [[ $GREP_EXIT -ne 0 ]]; then
@@ -25,11 +28,19 @@ elif [[ $GREP_EXIT -ne 0 ]]; then
     exit 1
 fi
 
+if [[ "$MODE" == "stale" ]]; then
+    PASS_MSG="All ignored CVEs are still present in scan results"
+    FAIL_MSG="$COUNT ignored CVEs not found in scan (stale ignores — remove them):"
+else
+    PASS_MSG="No vulnerabilities at or above $MODE severity"
+    FAIL_MSG="Found $COUNT vulnerabilities at or above $MODE severity:"
+fi
+
 if [[ "$COUNT" -eq 0 ]]; then
-    echo "PASS: No vulnerabilities at or above $FAIL_ON severity"
+    echo "PASS: $PASS_MSG"
     exit 0
 else
-    echo "FAIL: Found $COUNT vulnerabilities at or above $FAIL_ON severity:"
-    cat "$VIOLATIONS_FILE"
+    echo "FAIL: $FAIL_MSG"
+    cat "$FILE"
     exit 1
 fi
