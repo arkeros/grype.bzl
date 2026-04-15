@@ -24,7 +24,6 @@ exports_files([
     "database.bzl",
     "defs.bzl",
     "extensions.bzl",
-    "grype_check.sh",
     "cve_policy.bzl",
 ])
 

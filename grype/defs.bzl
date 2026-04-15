@@ -1,8 +1,6 @@
 """Grype vulnerability scanning rules and aspect."""
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
-load("@jq.bzl", "jq")
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@syft.bzl//syft:defs.bzl", "SyftSBOMInfo", "syft_sbom_aspect")
 load("//grype:cve_policy.bzl", "CvePolicyInfo")
 
@@ -232,11 +230,10 @@ Example (scan image directly):
 """,
 )
 
-# ---------- Macro: grype_test ----------
+_JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
-# jq filter to extract vulnerabilities at or above a severity threshold
-# Returns JSON array with CVE id, severity, package name/version, and fix info
-# Supports optional CVE ignore list
+# ---------- Rule & Macro: grype_test ----------
+
 _JQ_FILTER_TEMPLATE = """
 [.matches[]? | select(.vulnerability.severity | ascii_downcase | IN({severities})) | select(.vulnerability.id | IN({ignore_cves}) | not) | {{id: .vulnerability.id, severity: .vulnerability.severity, package: .artifact.name, version: .artifact.version, fix: .vulnerability.fix.versions[0]}}] | unique_by(.id + .package)
 """
@@ -255,17 +252,56 @@ def _severity_list(fail_on):
     idx = levels.index(fail_on)
     return ", ".join(['"%s"' % s for s in levels[idx:]])
 
+def _grype_test_impl(ctx):
+    jq_bin = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
+    scan = ctx.file.scan_result
+    jq_filter = ctx.attr.jq_filter
+    pass_msg = ctx.attr.pass_msg
+    fail_msg = ctx.attr.fail_msg
+
+    runner = ctx.actions.declare_file("{}_runner.sh".format(ctx.label.name))
+    ctx.actions.write(
+        output = runner,
+        content = """#!/bin/sh
+exec {jq} '{filter} | if length == 0 then "PASS: {pass_msg}" | halt_error(0) else "FAIL: {fail_msg} \\(.)" | halt_error(1) end' {scan}
+""".format(
+            jq = jq_bin.short_path,
+            filter = jq_filter.strip(),
+            scan = scan.short_path,
+            pass_msg = pass_msg,
+            fail_msg = fail_msg,
+        ),
+        is_executable = True,
+    )
+
+    runfiles = ctx.runfiles(files = [scan, jq_bin])
+    return [DefaultInfo(
+        executable = runner,
+        runfiles = runfiles,
+    )]
+
+_grype_test = rule(
+    implementation = _grype_test_impl,
+    test = True,
+    attrs = {
+        "scan_result": attr.label(
+            mandatory = True,
+            allow_single_file = True,
+        ),
+        "jq_filter": attr.string(mandatory = True),
+        "pass_msg": attr.string(mandatory = True),
+        "fail_msg": attr.string(mandatory = True),
+    },
+    toolchains = [
+        config_common.toolchain_type(_JQ_TOOLCHAIN_TYPE, mandatory = True),
+    ],
+)
+
 def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = None, fail_on_stale_ignores = True, **kwargs):
     """Test macro that checks grype scan result against severity threshold.
 
     This creates a test target that fails if vulnerabilities at or above the
     specified severity level are found in the grype scan result.
-
-    Unlike `grype_scan` with `fail_on`, this creates a proper test target that:
-    - Can be run separately from builds with `bazel test`
-    - Can have test tags like `manual` or `external`
-    - Integrates with CI test reporters
-    - Supports ignoring specific CVEs
 
     When `ignore_cves` is provided and `fail_on_stale_ignores` is True (default),
     an additional test target `{name}_stale_ignores` is created that fails if any
@@ -285,22 +321,19 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
             name = "vuln_check",
             scan_result = ":vuln_report",
             fail_on_severity = "high",
-            ignore_cves = ["CVE-2024-1234"],  # Known false positive
+            ignore_cves = ["CVE-2024-1234"],
         )
         ```
 
     Args:
         name: Name of the test target
         scan_result: Label of grype_scan output JSON file
-        fail_on_severity: Minimum severity level to fail on (negligible, low, medium, high, critical)
-        ignore_cves: List of CVE IDs to ignore (e.g., ["CVE-2024-1234"])
+        fail_on_severity: Minimum severity level to fail on
+        ignore_cves: List of CVE IDs to ignore
         fail_on_stale_ignores: If True (default), create a sibling test that fails when
             ignored CVEs are no longer found in the scan results
-        **kwargs: Additional arguments passed to native.sh_test
+        **kwargs: Additional arguments passed to the test rule
     """
-
-    # Use jq to filter vulnerabilities at or above threshold
-    jq_name = name + "_violations"
     cve_list = ", ".join(['"%s"' % cve for cve in ignore_cves]) if ignore_cves else None
 
     if cve_list:
@@ -313,57 +346,26 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
             severities = _severity_list(fail_on_severity),
         )
 
-    jq(
-        name = jq_name,
-        srcs = [scan_result],
-        filter = jq_filter,
-    )
-
-    count_name = jq_name + "_count"
-    jq(
-        name = count_name,
-        srcs = [":" + jq_name],
-        filter = "length",
-    )
-
-    # Simple test that fails if any violations found
-    sh_test(
+    _grype_test(
         name = name,
-        srcs = ["@grype.bzl//grype:grype_check.sh"],
-        data = [":" + jq_name, ":" + count_name],
-        args = ["$(location :" + jq_name + ")", "$(location :" + count_name + ")", fail_on_severity],
+        scan_result = scan_result,
+        jq_filter = jq_filter,
+        pass_msg = "No vulnerabilities at or above %s severity" % fail_on_severity,
+        fail_msg = "Found vulnerabilities at or above %s severity:" % fail_on_severity,
         **kwargs
     )
 
-    # Stale ignores test: fails if any ignored CVE is not found in the scan
     if cve_list and fail_on_stale_ignores:
-        stale_jq_name = name + "_stale_ignores_violations"
-        jq(
-            name = stale_jq_name,
-            srcs = [scan_result],
-            filter = _JQ_STALE_IGNORES_FILTER_TEMPLATE.format(
-                ignore_cves = cve_list,
-            ),
-        )
-
-        stale_count_name = stale_jq_name + "_count"
-        jq(
-            name = stale_count_name,
-            srcs = [":" + stale_jq_name],
-            filter = "length",
-        )
-
-        sh_test(
+        _grype_test(
             name = name + "_stale_ignores",
-            srcs = ["@grype.bzl//grype:grype_check.sh"],
-            data = [":" + stale_jq_name, ":" + stale_count_name],
-            args = ["$(location :" + stale_jq_name + ")", "$(location :" + stale_count_name + ")"],
+            scan_result = scan_result,
+            jq_filter = _JQ_STALE_IGNORES_FILTER_TEMPLATE.format(ignore_cves = cve_list),
+            pass_msg = "All ignored CVEs are still present in scan results",
+            fail_msg = "Ignored CVEs not found in scan (stale ignores — remove them):",
             **kwargs
         )
 
 # ---------- Aspect: grype_aspect ----------
-
-_JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
 def _build_jq_filter(fail_on_severity, ignore_cves):
     """Build jq filter for the aspect validation action."""
@@ -429,46 +431,20 @@ export GRYPE_CHECK_FOR_APP_UPDATE=false
         progress_message = "Scanning for vulnerabilities for %s" % target.label,
     )
 
-    # Action 2: Filter violations with jq
+    # Action 2: Filter and validate violations with jq
     jq_bin = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
     jq_filter = _build_jq_filter(fail_on_severity, ignore_cves)
-    violations = ctx.actions.declare_file("{}.grype_violations.json".format(target.label.name))
-    ctx.actions.run_shell(
-        inputs = [report],
-        outputs = [violations],
-        tools = [jq_bin],
-        command = """{jq} '{filter}' {input} > {output}""".format(
-            jq = jq_bin.path,
-            filter = jq_filter.strip(),
-            input = report.path,
-            output = violations.path,
-        ),
-        mnemonic = "GrypeFilter",
-        progress_message = "Filtering vulnerabilities for %s" % target.label,
-    )
-
-    # Action 3: Validate → marker file (fails if violations found)
     validation = ctx.actions.declare_file("{}.grype_validation".format(target.label.name))
     ctx.actions.run_shell(
-        inputs = [violations],
+        inputs = [report],
         outputs = [validation],
         tools = [jq_bin],
-        command = """
-set -euo pipefail
-COUNT=$({jq} 'length' {violations})
-if [ "$COUNT" -eq 0 ]; then
-    echo "PASS: No vulnerabilities at or above {severity} severity"
-else
-    DETAILS=$(tr -d '\\n' < {violations} | sed 's/  */ /g')
-    echo "FAIL: Found $COUNT vulnerabilities at or above {severity} severity: $DETAILS"
-    exit 1
-fi
-touch {marker}
-""".format(
+        command = """{jq} '{filter} | if length == 0 then "PASS: No vulnerabilities at or above {severity} severity" | halt_error(0) else "FAIL: Found \\(length) vulnerabilities at or above {severity} severity: \\(.)" | halt_error(1) end' {input} && touch {output}""".format(
             jq = jq_bin.path,
-            violations = violations.path,
+            filter = jq_filter.strip(),
             severity = fail_on_severity,
-            marker = validation.path,
+            input = report.path,
+            output = validation.path,
         ),
         mnemonic = "GrypeValidate",
         progress_message = "Validating CVE policy for %s" % target.label,
@@ -476,45 +452,20 @@ touch {marker}
 
     validation_outputs = [validation]
 
-    # Action 4: Stale ignores check (fails if ignored CVEs are no longer in scan)
+    # Action 3: Stale ignores check (fails if ignored CVEs are no longer in scan)
     if ignore_cves:
         cve_list = ", ".join(['"%s"' % cve for cve in ignore_cves])
         stale_filter = _JQ_STALE_IGNORES_FILTER_TEMPLATE.format(ignore_cves = cve_list).strip()
-        stale_ignores = ctx.actions.declare_file("{}.grype_stale_ignores.json".format(target.label.name))
+        stale_validation = ctx.actions.declare_file("{}.grype_stale_validation".format(target.label.name))
         ctx.actions.run_shell(
             inputs = [report],
-            outputs = [stale_ignores],
+            outputs = [stale_validation],
             tools = [jq_bin],
-            command = """{jq} '{filter}' {input} > {output}""".format(
+            command = """{jq} '{filter} | if length == 0 then "PASS: All ignored CVEs are still present in scan results" | halt_error(0) else "FAIL: \\(length) ignored CVEs not found in scan (stale ignores — remove them): \\(.)" | halt_error(1) end' {input} && touch {output}""".format(
                 jq = jq_bin.path,
                 filter = stale_filter,
                 input = report.path,
-                output = stale_ignores.path,
-            ),
-            mnemonic = "GrypeStaleFilter",
-            progress_message = "Checking for stale CVE ignores for %s" % target.label,
-        )
-
-        stale_validation = ctx.actions.declare_file("{}.grype_stale_validation".format(target.label.name))
-        ctx.actions.run_shell(
-            inputs = [stale_ignores],
-            outputs = [stale_validation],
-            tools = [jq_bin],
-            command = """
-set -euo pipefail
-COUNT=$({jq} 'length' {stale})
-if [ "$COUNT" -eq 0 ]; then
-    echo "PASS: All ignored CVEs are still present in scan results"
-else
-    DETAILS=$(tr -d '\\n' < {stale} | sed 's/  */ /g')
-    echo "FAIL: $COUNT ignored CVEs not found in scan (stale ignores — remove them): $DETAILS"
-    exit 1
-fi
-touch {marker}
-""".format(
-                jq = jq_bin.path,
-                stale = stale_ignores.path,
-                marker = stale_validation.path,
+                output = stale_validation.path,
             ),
             mnemonic = "GrypeStaleValidate",
             progress_message = "Validating stale CVE ignores for %s" % target.label,
