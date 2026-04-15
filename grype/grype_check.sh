@@ -2,31 +2,20 @@
 # Check grype JSON results - fails if any entries found.
 #
 # Usage:
-#   grype_check.sh <file> <severity>   — violation mode (CVEs above threshold)
-#   grype_check.sh <file>              — stale ignore mode (ignored CVEs no longer in scan)
+#   grype_check.sh <results_file> <count_file> <severity>   — violation mode
+#   grype_check.sh <results_file> <count_file>              — stale ignore mode
 set -euo pipefail
 
 FILE="$1"
-MODE="${2:-stale}"
+COUNT_FILE="$2"
+MODE="${3:-stale}"
 
 if [[ ! -f "$FILE" ]]; then
     echo "ERROR: Results file not found: $FILE"
     exit 1
 fi
 
-# Count entries in JSON array (matches both object and string elements)
-set +e
-COUNT=$(grep -c '"CVE-' "$FILE" 2>/dev/null)
-GREP_EXIT=$?
-set -e
-
-# grep returns 1 if no match - count will be 0
-if [[ $GREP_EXIT -eq 1 ]]; then
-    COUNT=0
-elif [[ $GREP_EXIT -ne 0 ]]; then
-    echo "ERROR: grep failed with exit code $GREP_EXIT"
-    exit 1
-fi
+COUNT=$(cat "$COUNT_FILE")
 
 if [[ "$MODE" == "stale" ]]; then
     PASS_MSG="All ignored CVEs are still present in scan results"
@@ -40,7 +29,8 @@ if [[ "$COUNT" -eq 0 ]]; then
     echo "PASS: $PASS_MSG"
     exit 0
 else
-    echo "FAIL: $FAIL_MSG"
-    cat "$FILE"
+    # Print details on a single line so bazel shows it in the build summary
+    DETAILS=$(tr -d '\n' < "$FILE" | sed 's/  */ /g')
+    echo "FAIL: $FAIL_MSG $DETAILS"
     exit 1
 fi

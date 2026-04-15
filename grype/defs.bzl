@@ -319,12 +319,19 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
         filter = jq_filter,
     )
 
+    count_name = jq_name + "_count"
+    jq(
+        name = count_name,
+        srcs = [":" + jq_name],
+        filter = "length",
+    )
+
     # Simple test that fails if any violations found
     sh_test(
         name = name,
         srcs = ["@grype.bzl//grype:grype_check.sh"],
-        data = [":" + jq_name],
-        args = ["$(location :" + jq_name + ")", fail_on_severity],
+        data = [":" + jq_name, ":" + count_name],
+        args = ["$(location :" + jq_name + ")", "$(location :" + count_name + ")", fail_on_severity],
         **kwargs
     )
 
@@ -339,11 +346,18 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
             ),
         )
 
+        stale_count_name = stale_jq_name + "_count"
+        jq(
+            name = stale_count_name,
+            srcs = [":" + stale_jq_name],
+            filter = "length",
+        )
+
         sh_test(
             name = name + "_stale_ignores",
             srcs = ["@grype.bzl//grype:grype_check.sh"],
-            data = [":" + stale_jq_name],
-            args = ["$(location :" + stale_jq_name + ")"],
+            data = [":" + stale_jq_name, ":" + stale_count_name],
+            args = ["$(location :" + stale_jq_name + ")", "$(location :" + stale_count_name + ")"],
             **kwargs
         )
 
@@ -434,17 +448,24 @@ export GRYPE_CHECK_FOR_APP_UPDATE=false
     )
 
     # Action 3: Validate → marker file (fails if violations found)
-    check_sh = ctx.attr._check_sh.files.to_list()[0]
     validation = ctx.actions.declare_file("{}.grype_validation".format(target.label.name))
     ctx.actions.run_shell(
-        inputs = [violations, check_sh],
+        inputs = [violations],
         outputs = [validation],
+        tools = [jq_bin],
         command = """
 set -euo pipefail
-bash {check} "{violations}" "{severity}"
+COUNT=$({jq} 'length' {violations})
+if [ "$COUNT" -eq 0 ]; then
+    echo "PASS: No vulnerabilities at or above {severity} severity"
+else
+    DETAILS=$(tr -d '\\n' < {violations} | sed 's/  */ /g')
+    echo "FAIL: Found $COUNT vulnerabilities at or above {severity} severity: $DETAILS"
+    exit 1
+fi
 touch {marker}
 """.format(
-            check = check_sh.path,
+            jq = jq_bin.path,
             violations = violations.path,
             severity = fail_on_severity,
             marker = validation.path,
@@ -476,14 +497,22 @@ touch {marker}
 
         stale_validation = ctx.actions.declare_file("{}.grype_stale_validation".format(target.label.name))
         ctx.actions.run_shell(
-            inputs = [stale_ignores, check_sh],
+            inputs = [stale_ignores],
             outputs = [stale_validation],
+            tools = [jq_bin],
             command = """
 set -euo pipefail
-bash {check} "{stale}"
+COUNT=$({jq} 'length' {stale})
+if [ "$COUNT" -eq 0 ]; then
+    echo "PASS: All ignored CVEs are still present in scan results"
+else
+    DETAILS=$(tr -d '\\n' < {stale} | sed 's/  */ /g')
+    echo "FAIL: $COUNT ignored CVEs not found in scan (stale ignores — remove them): $DETAILS"
+    exit 1
+fi
 touch {marker}
 """.format(
-                check = check_sh.path,
+                jq = jq_bin.path,
                 stale = stale_ignores.path,
                 marker = stale_validation.path,
             ),
@@ -513,10 +542,6 @@ grype_aspect = aspect(
         ),
         "_database": attr.label(
             default = Label("@grype.bzl//grype:database"),
-        ),
-        "_check_sh": attr.label(
-            default = Label("@grype.bzl//grype:grype_check.sh"),
-            allow_single_file = True,
         ),
     },
     toolchains = [
