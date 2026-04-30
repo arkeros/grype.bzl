@@ -174,7 +174,6 @@ grype_scan = rule(
             doc = "OCI image target with an 'oci_tarball' (rules_img) or 'tarball' (rules_oci) output group. Mutually exclusive with 'sbom'.",
         ),
         "sbom": attr.label(
-            cfg = _linux_transition,
             allow_single_file = [".json", ".spdx.json", ".cdx.json"],
             doc = "SBOM file to scan for vulnerabilities. Mutually exclusive with 'image'.",
         ),
