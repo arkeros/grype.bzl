@@ -264,6 +264,13 @@ _JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 # than silently dropping CVE IDs.
 _OPENVEX_CONTEXT = "https://openvex.dev/ns/v0.2.0"
 
+# Maximum window between today and a VEX statement's `expires` date.
+# Forces periodic re-justification — silencing decisions are debts with
+# due dates, not permanent settlements. `expires` is a senku-flavored
+# extension to OpenVEX 0.2.0 (the spec has `timestamp` and `last_updated`
+# but no expiry); this rule validates it action-side, statement-by-statement.
+_VEX_EXPIRES_MAX_DAYS = 90
+
 _JQ_FILTER_TEMPLATE = """
 ([.[]?.statements[]?.vulnerability.name] + [{ignore_cves}] | unique) as $all_ignored |
 [$scan[0].matches[]? | select(.vulnerability.severity | ascii_downcase | IN({severities})) | select(.vulnerability.id | IN($all_ignored[]) | not) | {{id: .vulnerability.id, severity: .vulnerability.severity, package: .artifact.name, version: .artifact.version, fix: .vulnerability.fix.versions[0]}}] | unique_by(.id + .package)
@@ -294,14 +301,37 @@ def _grype_test_impl(ctx):
     if vex_files:
         vex_paths = " ".join(['"%s"' % f.short_path for f in vex_files])
 
-        # Loud failure on schema mismatch beats silent CVE-ID drop. A future
-        # OpenVEX 0.3+ doc would have a different `@context` value; without
-        # this check, our jq path-extraction would silently match nothing.
+        # Two-pass validation per VEX doc:
+        #   1. Schema check — `@context` must match the version we know how
+        #      to parse. A future OpenVEX 0.3+ would otherwise silently
+        #      match no CVE IDs (path-extraction returns empty).
+        #   2. Per-statement `expires` check — date must be present, not
+        #      past, and no more than _VEX_EXPIRES_MAX_DAYS in the future.
+        #      `expires` is a senku-flavored extension to OpenVEX (the spec
+        #      has no expiry mechanism); this rule treats it as required.
         vex_validate = """
+TODAY=$({jq} -nr 'now | strftime("%Y-%m-%d")')
+CUTOFF=$({jq} -nr '(now + 86400 * {max_days}) | strftime("%Y-%m-%d")')
 for vex_doc in {vex_paths}; do
     ctx=$({jq} -r '.["@context"] // "<missing>"' "$vex_doc")
     if [ "$ctx" != "{expected_ctx}" ]; then
         echo "FAIL: $vex_doc declares @context=$ctx; this rule supports {expected_ctx}" >&2
+        exit 1
+    fi
+    issues=$({jq} -r --arg today "$TODAY" --arg cutoff "$CUTOFF" '
+        .statements // [] | map(
+          if (.expires // null) == null then
+            "MISSING_EXPIRES on \\(.vulnerability.name) — every VEX statement needs an `expires` date (RFC3339 YYYY-MM-DD, <=" + "{max_days}" + "d out)"
+          elif .expires < $today then
+            "EXPIRED \\(.expires) on \\(.vulnerability.name) — re-justify (bump expires) or delete the statement"
+          elif .expires > $cutoff then
+            "TOO_FAR \\(.expires) on \\(.vulnerability.name) — max is \\($cutoff) (today + " + "{max_days}" + "d)"
+          else empty end
+        ) | .[]
+    ' "$vex_doc")
+    if [ -n "$issues" ]; then
+        echo "FAIL: VEX expiry violations in $vex_doc:" >&2
+        echo "$issues" >&2
         exit 1
     fi
 done
@@ -309,6 +339,7 @@ done
             jq = jq_bin.short_path,
             vex_paths = vex_paths,
             expected_ctx = _OPENVEX_CONTEXT,
+            max_days = _VEX_EXPIRES_MAX_DAYS,
         )
         vex_cat = "cat " + vex_paths
     else:
