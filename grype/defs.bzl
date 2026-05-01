@@ -121,6 +121,13 @@ def _grype_scan_impl(ctx):
     if ctx.attr.fail_on:
         fail_on_flag = "--fail-on " + ctx.attr.fail_on
 
+    # Build VEX flags. Grype natively drops matches whose status is
+    # not_affected or fixed in any provided OpenVEX document.
+    vex_flags = ""
+    if ctx.files.vex:
+        vex_flags = " ".join(['--vex "$PWD/%s"' % f.path for f in ctx.files.vex])
+        inputs.extend(ctx.files.vex)
+
     # Handle database setup
     db_commands, db_inputs = _db_setup_commands(ctx.files.database if ctx.attr.database else [])
     inputs.extend(db_inputs)
@@ -133,7 +140,7 @@ def _grype_scan_impl(ctx):
 set -euo pipefail
 export GRYPE_CHECK_FOR_APP_UPDATE=false
 {db_setup}
-{grype} {input} -o {format} --file {output} {fail_on_flag}
+{grype} {input} -o {format} --file {output} {fail_on_flag} {vex_flags}
 """.format(
             db_setup = db_commands,
             grype = grype.path,
@@ -141,6 +148,7 @@ export GRYPE_CHECK_FOR_APP_UPDATE=false
             format = format,
             output = output.path,
             fail_on_flag = fail_on_flag,
+            vex_flags = vex_flags,
         ),
         mnemonic = "GrypeScan",
         progress_message = "Scanning for vulnerabilities (%s) for %s" % (format, ctx.label),
@@ -185,6 +193,11 @@ grype_scan = rule(
         ),
         "database": attr.label(
             doc = "Grype vulnerability database. If not set, grype will download the latest database.",
+        ),
+        "vex": attr.label_list(
+            allow_files = [".json"],
+            doc = "OpenVEX documents passed to grype via --vex. Statements with " +
+                  "status=not_affected or fixed remove matching results from the report.",
         ),
     },
     outputs = _report_output,
