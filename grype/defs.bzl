@@ -234,17 +234,47 @@ Example (scan image directly):
 _JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
 # ---------- Rule & Macro: grype_test ----------
+#
+# Two ways to apply VEX docs in this module — both useful for different
+# downstream consumers:
+#
+#   * `grype_scan(vex = ...)` — passes docs to grype's native `--vex` flag.
+#     Suppressed entries are dropped from the scan JSON. Use when the scan
+#     JSON itself needs to be VEX-clean (e.g. consumed by a downstream
+#     tool that doesn't understand OpenVEX).
+#
+#   * `grype_test(vex = ...)` — applies docs as a jq post-filter on the
+#     unfiltered scan. The scan JSON keeps every match, but the policy
+#     test (and its `_stale_vex` companion) treats VEX-named CVE IDs as
+#     suppressed. Use when you want per-statement staleness signals —
+#     grype's `--show-suppressed` is table-only, so the scan JSON can't
+#     tell us which statements actually fired.
+#
+# Most users want only `grype_test(vex = ...)`. Filter templates below
+# read the scan via `$scan[0].matches` (--slurpfile) and the VEX docs
+# from `.[]` (slurped from stdin via `-s`). With no VEX docs, stdin is
+# empty and `-s` slurps to `[]`, making `.[].statements[]?` a no-op.
+#
+# CVE-ID matching loses VEX's product/status semantics; sufficient for
+# unscoped product PURLs (typical for distro CVE silencing). For scoped
+# products, prefer `grype_scan(vex = ...)`.
+
+# OpenVEX schema version this module's jq filters assume. Validated at
+# action time before any extraction; mismatched docs fail loudly rather
+# than silently dropping CVE IDs.
+_OPENVEX_CONTEXT = "https://openvex.dev/ns/v0.2.0"
 
 _JQ_FILTER_TEMPLATE = """
-[.matches[]? | select(.vulnerability.severity | ascii_downcase | IN({severities})) | select(.vulnerability.id | IN({ignore_cves}) | not) | {{id: .vulnerability.id, severity: .vulnerability.severity, package: .artifact.name, version: .artifact.version, fix: .vulnerability.fix.versions[0]}}] | unique_by(.id + .package)
-"""
-
-_JQ_FILTER_NO_IGNORE_TEMPLATE = """
-[.matches[]? | select(.vulnerability.severity | ascii_downcase | IN({severities})) | {{id: .vulnerability.id, severity: .vulnerability.severity, package: .artifact.name, version: .artifact.version, fix: .vulnerability.fix.versions[0]}}] | unique_by(.id + .package)
+([.[]?.statements[]?.vulnerability.name] + [{ignore_cves}] | unique) as $all_ignored |
+[$scan[0].matches[]? | select(.vulnerability.severity | ascii_downcase | IN({severities})) | select(.vulnerability.id | IN($all_ignored[]) | not) | {{id: .vulnerability.id, severity: .vulnerability.severity, package: .artifact.name, version: .artifact.version, fix: .vulnerability.fix.versions[0]}}] | unique_by(.id + .package)
 """
 
 _JQ_STALE_IGNORES_FILTER_TEMPLATE = """
-[{ignore_cves}] - [.matches[]?.vulnerability.id] | unique
+[{ignore_cves}] - [$scan[0].matches[]?.vulnerability.id] | unique
+"""
+
+_JQ_STALE_VEX_FILTER_TEMPLATE = """
+[.[]?.statements[]?.vulnerability.name] - [$scan[0].matches[]?.vulnerability.id] | unique
 """
 
 def _severity_list(fail_on):
@@ -256,26 +286,57 @@ def _severity_list(fail_on):
 def _grype_test_impl(ctx):
     jq_bin = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
     scan = ctx.file.scan_result
+    vex_files = ctx.files.vex
     jq_filter = ctx.attr.jq_filter
     pass_msg = ctx.attr.pass_msg
     fail_msg = ctx.attr.fail_msg
+
+    if vex_files:
+        vex_paths = " ".join(['"%s"' % f.short_path for f in vex_files])
+
+        # Loud failure on schema mismatch beats silent CVE-ID drop. A future
+        # OpenVEX 0.3+ doc would have a different `@context` value; without
+        # this check, our jq path-extraction would silently match nothing.
+        vex_validate = """
+for vex_doc in {vex_paths}; do
+    ctx=$({jq} -r '.["@context"] // "<missing>"' "$vex_doc")
+    if [ "$ctx" != "{expected_ctx}" ]; then
+        echo "FAIL: $vex_doc declares @context=$ctx; this rule supports {expected_ctx}" >&2
+        exit 1
+    fi
+done
+""".format(
+            jq = jq_bin.short_path,
+            vex_paths = vex_paths,
+            expected_ctx = _OPENVEX_CONTEXT,
+        )
+        vex_cat = "cat " + vex_paths
+    else:
+        vex_validate = ""
+
+        # `-s` of empty stdin slurps to `[]`, making the filter VEX-agnostic.
+        vex_cat = "printf ''"
 
     runner = ctx.actions.declare_file("{}_runner.sh".format(ctx.label.name))
     ctx.actions.write(
         output = runner,
         content = """#!/bin/sh
-exec {jq} '{filter} | if length == 0 then "PASS: {pass_msg}" | halt_error(0) else "FAIL: {fail_msg} \\(.)" | halt_error(1) end' {scan}
+set -e
+{vex_validate}
+{vex_cat} | {jq} --slurpfile scan {scan} -s '{filter} | if length == 0 then "PASS: {pass_msg}" | halt_error(0) else "FAIL: {fail_msg} \\(.)" | halt_error(1) end'
 """.format(
+            vex_validate = vex_validate,
+            vex_cat = vex_cat,
             jq = jq_bin.short_path,
-            filter = jq_filter.strip(),
             scan = scan.short_path,
+            filter = jq_filter.strip(),
             pass_msg = pass_msg,
             fail_msg = fail_msg,
         ),
         is_executable = True,
     )
 
-    runfiles = ctx.runfiles(files = [scan, jq_bin])
+    runfiles = ctx.runfiles(files = [scan, jq_bin] + vex_files)
     return [DefaultInfo(
         executable = runner,
         runfiles = runfiles,
@@ -289,6 +350,11 @@ _grype_test = rule(
             mandatory = True,
             allow_single_file = True,
         ),
+        "vex": attr.label_list(
+            allow_files = [".json"],
+            doc = "OpenVEX documents whose statements' CVE IDs are added to " +
+                  "the suppression set during filtering.",
+        ),
         "jq_filter": attr.string(mandatory = True),
         "pass_msg": attr.string(mandatory = True),
         "fail_msg": attr.string(mandatory = True),
@@ -298,58 +364,69 @@ _grype_test = rule(
     ],
 )
 
-def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = None, fail_on_stale_ignores = True, **kwargs):
+def grype_test(
+        name,
+        scan_result,
+        fail_on_severity = "critical",
+        ignore_cves = None,
+        vex = None,
+        fail_on_stale_ignores = True,
+        fail_on_stale_vex = True,
+        **kwargs):
     """Test macro that checks grype scan result against severity threshold.
 
-    This creates a test target that fails if vulnerabilities at or above the
-    specified severity level are found in the grype scan result.
+    Fails if any vulnerability at or above `fail_on_severity` survives
+    filtering by `ignore_cves` (flat CVE-ID list) and `vex` (OpenVEX docs
+    whose statement CVE IDs are extracted at action time).
 
-    When `ignore_cves` is provided and `fail_on_stale_ignores` is True (default),
-    an additional test target `{name}_stale_ignores` is created that fails if any
-    ignored CVE is no longer present in the scan results, indicating the ignore
-    entry is stale and should be removed.
+    When `ignore_cves` is provided and `fail_on_stale_ignores` is True
+    (default), a sibling `{name}_stale_ignores` test fails if any
+    `ignore_cves` entry no longer matches a scan result.
+
+    When `vex` is provided and `fail_on_stale_vex` is True (default), a
+    sibling `{name}_stale_vex` test fails if any VEX statement targets a
+    CVE that is no longer in the scan — typical when grype's DB syncs the
+    distro's "fixed" status and the statement becomes a no-op.
 
     Example:
         ```starlark
         load("@grype.bzl", "grype_scan", "grype_test")
 
-        grype_scan(
-            name = "vuln_report",
-            sbom = ":my_sbom",
-        )
-
+        grype_scan(name = "vuln_report", sbom = ":my_sbom")
         grype_test(
             name = "vuln_check",
             scan_result = ":vuln_report",
             fail_on_severity = "high",
             ignore_cves = ["CVE-2024-1234"],
+            vex = [":my_image_vex"],
         )
         ```
 
     Args:
-        name: Name of the test target
-        scan_result: Label of grype_scan output JSON file
-        fail_on_severity: Minimum severity level to fail on
-        ignore_cves: List of CVE IDs to ignore
-        fail_on_stale_ignores: If True (default), create a sibling test that fails when
-            ignored CVEs are no longer found in the scan results
-        **kwargs: Additional arguments passed to the test rule
+        name: Name of the test target.
+        scan_result: Label of grype_scan output JSON file.
+        fail_on_severity: Minimum severity level to fail on.
+        ignore_cves: List of CVE IDs to ignore.
+        vex: List of OpenVEX 0.2.0 document labels (as produced by
+            authoring rules outside grype.bzl). All statement
+            `vulnerability.name` values are added to the suppression set
+            for both the main filter and the stale-vex sibling test.
+        fail_on_stale_ignores: If True (default), generate
+            `{name}_stale_ignores`.
+        fail_on_stale_vex: If True (default), generate `{name}_stale_vex`.
+        **kwargs: Additional arguments passed to the test rule.
     """
-    cve_list = ", ".join(['"%s"' % cve for cve in ignore_cves]) if ignore_cves else None
+    cve_list = ", ".join(['"%s"' % cve for cve in ignore_cves]) if ignore_cves else ""
 
-    if cve_list:
-        jq_filter = _JQ_FILTER_TEMPLATE.format(
-            severities = _severity_list(fail_on_severity),
-            ignore_cves = cve_list,
-        )
-    else:
-        jq_filter = _JQ_FILTER_NO_IGNORE_TEMPLATE.format(
-            severities = _severity_list(fail_on_severity),
-        )
+    jq_filter = _JQ_FILTER_TEMPLATE.format(
+        severities = _severity_list(fail_on_severity),
+        ignore_cves = cve_list,
+    )
 
     _grype_test(
         name = name,
         scan_result = scan_result,
+        vex = vex or [],
         jq_filter = jq_filter,
         pass_msg = "No vulnerabilities at or above %s severity" % fail_on_severity,
         fail_msg = "Found vulnerabilities at or above %s severity:" % fail_on_severity,
@@ -363,5 +440,16 @@ def grype_test(name, scan_result, fail_on_severity = "critical", ignore_cves = N
             jq_filter = _JQ_STALE_IGNORES_FILTER_TEMPLATE.format(ignore_cves = cve_list),
             pass_msg = "All ignored CVEs are still present in scan results",
             fail_msg = "Ignored CVEs not found in scan (stale ignores — remove them):",
+            **kwargs
+        )
+
+    if vex and fail_on_stale_vex:
+        _grype_test(
+            name = name + "_stale_vex",
+            scan_result = scan_result,
+            vex = vex,
+            jq_filter = _JQ_STALE_VEX_FILTER_TEMPLATE,
+            pass_msg = "All VEX statements still match a scan CVE",
+            fail_msg = "VEX statements with no corresponding scan match (stale, delete them):",
             **kwargs
         )
