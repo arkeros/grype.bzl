@@ -96,20 +96,33 @@ def _grype_scan_impl(ctx):
         input_arg = 'sbom:"$PWD/{}"'.format(input_file.path)
         inputs = [input_file]
     elif ctx.attr.image:
-        # Support both rules_img (oci_tarball) and rules_oci (tarball)
+        # `image` carries a platform transition, and an attribute under a
+        # transition reads back as a list of targets even when the
+        # transition is 1:1. Unwrap it, or the provider check below never
+        # matches and every image scan fails at analysis.
+        image = ctx.attr.image
+        if type(image) == "list":
+            image = image[0]
+
+        # rules_img's `oci_tarball` is an OCI layout in a tar; rules_oci's
+        # and rules_img's `image_load` `tarball` is a docker-save archive.
+        # grype reads each through its own source scheme.
         tarball = None
-        if OutputGroupInfo in ctx.attr.image:
-            output_group_info = ctx.attr.image[OutputGroupInfo]
+        scheme = None
+        if OutputGroupInfo in image:
+            output_group_info = image[OutputGroupInfo]
             if hasattr(output_group_info, "oci_tarball"):
                 tarball = output_group_info.oci_tarball.to_list()[0]
+                scheme = "oci-archive"
             elif hasattr(output_group_info, "tarball"):
                 tarball = output_group_info.tarball.to_list()[0]
+                scheme = "docker-archive"
 
         if tarball == None:
-            fail("image must have an 'oci_tarball' (rules_img) or 'tarball' (rules_oci) output group")
+            fail("image must have an 'oci_tarball' (rules_img) or 'tarball' (rules_oci, image_load) output group")
 
         input_file = tarball
-        input_arg = 'docker-archive:"$PWD/{}"'.format(tarball.path)
+        input_arg = '{}:"$PWD/{}"'.format(scheme, tarball.path)
         inputs = [tarball]
     else:
         fail("Either 'sbom' or 'image' must be specified")
