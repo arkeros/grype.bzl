@@ -100,6 +100,24 @@ def _reproducible_report_impl(ctx):
 
 reproducible_report_test = analysistest.make(_reproducible_report_impl)
 
+def _pinned_database_is_usable_impl(ctx):
+    env = analysistest.begin(ctx)
+    command = _scan_action(env)
+
+    # grype refuses a database built more than five days ago. That check is
+    # there to stop an auto-downloaded database going stale, and it makes a
+    # *pinned* one unusable: every `database = ...` target starts failing five
+    # days after the database was built. Pinning is the caller saying they own
+    # the choice of database, so the age check is off when they have.
+    asserts.true(
+        env,
+        "GRYPE_DB_VALIDATE_AGE=false" in command,
+        "a pinned database is still subject to grype's five-day age limit: " + command,
+    )
+    return analysistest.end(env)
+
+pinned_database_is_usable_test = analysistest.make(_pinned_database_is_usable_impl)
+
 records_a_relative_image_path_test = analysistest.make(
     _records_a_relative_image_path_impl,
     # The scheme follows the output group the image target carries:
@@ -121,6 +139,14 @@ fake_image = rule(
     implementation = _fake_image_impl,
     attrs = {"output_group": attr.string(mandatory = True)},
 )
+
+def _fake_database_impl(ctx):
+    """A tree artifact, which is what `_db_setup_commands` looks for."""
+    db = ctx.actions.declare_directory(ctx.label.name + ".db")
+    ctx.actions.run_shell(outputs = [db], command = "mkdir -p " + db.path)
+    return [DefaultInfo(files = depset([db]))]
+
+fake_database = rule(implementation = _fake_database_impl)
 
 def scan_command_test_suite(name):
     """Declares the analysis tests and the targets they analyse.
@@ -161,10 +187,24 @@ def scan_command_test_suite(name):
         target_under_test = ":scan_subject",
     )
 
+    fake_database(name = "fake_db", tags = ["manual"])
+    grype_scan(
+        name = "pinned_db_scan_subject",
+        database = ":fake_db",
+        sbom = "//test/testdata:sbom.json",
+        grype = "//test/testdata:fake_grype",
+        tags = ["manual"],
+    )
+    pinned_database_is_usable_test(
+        name = "pinned_database_is_usable",
+        target_under_test = ":pinned_db_scan_subject",
+    )
+
     native.test_suite(
         name = name,
         tests = [
             ":records_a_relative_source_path",
             ":reproducible_report",
+            ":pinned_database_is_usable",
         ] + image_tests,
     )

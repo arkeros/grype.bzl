@@ -82,6 +82,12 @@ mkdir -p "{cache_dir}/6"
 ln -s "$PWD/{db_dir}"/* "{cache_dir}/6/"
 export GRYPE_DB_CACHE_DIR="{cache_dir}"
 export GRYPE_DB_AUTO_UPDATE=false
+# grype refuses a database built more than five days ago, which is the right
+# default for one it downloaded itself and the wrong one for a database the
+# caller pinned: it would make every `database = ...` target start failing
+# five days after that database was built. Pinning is the caller taking
+# ownership of which database is used, age included.
+export GRYPE_DB_VALIDATE_AGE=false
 """.format(cache_dir = cache_dir, db_dir = db_dir.path), [db_dir])
 
     return ("""
