@@ -93,7 +93,14 @@ def _grype_scan_impl(ctx):
     # Determine input source: SBOM file or OCI image tarball
     if ctx.attr.sbom:
         input_file = ctx.file.sbom
-        input_arg = 'sbom:"$PWD/{}"'.format(input_file.path)
+
+        # Execroot-relative, not absolute. grype copies the path it was handed
+        # into the report verbatim, as `source.target`, so `$PWD` bakes the
+        # sandbox directory of this action -- Bazel's per-action sandbox
+        # counter included -- into output that is published and attested
+        # downstream. The action's working directory is the execroot, so a
+        # relative path names the same file and reads the same everywhere.
+        input_arg = 'sbom:"{}"'.format(input_file.path)
         inputs = [input_file]
     elif ctx.attr.image:
         # `image` carries a platform transition, and an attribute under a
@@ -122,7 +129,9 @@ def _grype_scan_impl(ctx):
             fail("image must have an 'oci_tarball' (rules_img) or 'tarball' (rules_oci, image_load) output group")
 
         input_file = tarball
-        input_arg = '{}:"$PWD/{}"'.format(scheme, tarball.path)
+
+        # Relative, for the reason the sbom branch above gives.
+        input_arg = '{}:"{}"'.format(scheme, tarball.path)
         inputs = [tarball]
     else:
         fail("Either 'sbom' or 'image' must be specified")
@@ -138,7 +147,9 @@ def _grype_scan_impl(ctx):
     # not_affected or fixed in any provided OpenVEX document.
     vex_flags = ""
     if ctx.files.vex:
-        vex_flags = " ".join(['--vex "$PWD/%s"' % f.path for f in ctx.files.vex])
+        # Relative too: grype echoes these back under
+        # `descriptor.configuration.vex-documents`.
+        vex_flags = " ".join(['--vex "%s"' % f.path for f in ctx.files.vex])
         inputs.extend(ctx.files.vex)
 
     # Handle database setup
