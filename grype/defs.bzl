@@ -51,11 +51,19 @@ def _get_grype_binary(ctx):
         return None
     return toolchain_info.grype_info.grype_binary
 
-def _db_setup_commands(database_files):
+def _db_setup_commands(database_files, cache_dir):
     """Generate shell commands for database setup.
+
+    grype echoes `GRYPE_DB_CACHE_DIR` back in the report, under
+    `descriptor.configuration.db.cache-dir`, so this path is part of the
+    output. `mktemp -d` therefore made every scan differ from every other
+    scan of the same thing. The caller passes a path derived from the report
+    file instead: unique per action, so concurrent actions sharing an
+    execroot cannot collide, and identical on every build of that target.
 
     Args:
         database_files: List of Files from the database target, or empty list.
+        cache_dir: Execroot-relative directory for grype's database cache.
 
     Returns:
         Tuple of (shell_commands_string, list_of_input_files).
@@ -69,18 +77,22 @@ def _db_setup_commands(database_files):
     if db_dir:
         return ("""
 # Create directory structure grype expects: cache_dir/6/
-GRYPE_CACHE_DIR=$(mktemp -d)
-mkdir -p "$GRYPE_CACHE_DIR/6"
-ln -s "$PWD/{db_dir}"/* "$GRYPE_CACHE_DIR/6/"
-export GRYPE_DB_CACHE_DIR="$GRYPE_CACHE_DIR"
+rm -rf "{cache_dir}"
+mkdir -p "{cache_dir}/6"
+ln -s "$PWD/{db_dir}"/* "{cache_dir}/6/"
+export GRYPE_DB_CACHE_DIR="{cache_dir}"
 export GRYPE_DB_AUTO_UPDATE=false
-""".format(db_dir = db_dir.path), [db_dir])
+""".format(cache_dir = cache_dir, db_dir = db_dir.path), [db_dir])
 
     return ("""
-export GRYPE_DB_CACHE_DIR=$(mktemp -d)
-""", [])
+rm -rf "{cache_dir}"
+mkdir -p "{cache_dir}"
+export GRYPE_DB_CACHE_DIR="{cache_dir}"
+""".format(cache_dir = cache_dir), [])
 
 # ---------- Rule: grype_scan ----------
+
+_JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
 def _grype_scan_impl(ctx):
     """Run grype vulnerability scan."""
@@ -153,19 +165,41 @@ def _grype_scan_impl(ctx):
         inputs.extend(ctx.files.vex)
 
     # Handle database setup
-    db_commands, db_inputs = _db_setup_commands(ctx.files.database if ctx.attr.database else [])
+    db_commands, db_inputs = _db_setup_commands(
+        ctx.files.database if ctx.attr.database else [],
+        output.path + ".db-cache",
+    )
     inputs.extend(db_inputs)
+
+    # grype emits equally-ranked matches in an order that varies between runs
+    # of the same command; no --sort-by strategy settles it, so the report is
+    # sorted after the fact. Descending risk first, which is the order grype
+    # means to convey, then the match itself, which is a total order and so
+    # leaves nothing to chance.
+    jq = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
+    tools = [grype]
+    normalise = ""
+    if format == "json":
+        tools.append(jq)
+        normalise = """
+{jq} -S 'if .matches then .matches |= sort_by([-(.vulnerability.risk // 0), tojson]) else . end' \
+    "{output}" > "{output}.sorted"
+mv "{output}.sorted" "{output}"
+""".format(jq = jq.path, output = output.path)
 
     ctx.actions.run_shell(
         inputs = inputs,
         outputs = [output],
-        tools = [grype],
+        tools = tools,
         command = """
 set -euo pipefail
 export GRYPE_CHECK_FOR_APP_UPDATE=false
+# grype stamps `descriptor.timestamp` with the wall clock otherwise. There is
+# no flag for it; the config key is reachable as an environment variable.
+export GRYPE_TIMESTAMP=false
 {db_setup}
 {grype} {input} -o {format} --file {output} {fail_on_flag} {vex_flags}
-""".format(
+{normalise}""".format(
             db_setup = db_commands,
             grype = grype.path,
             input = input_arg,
@@ -173,6 +207,7 @@ export GRYPE_CHECK_FOR_APP_UPDATE=false
             output = output.path,
             fail_on_flag = fail_on_flag,
             vex_flags = vex_flags,
+            normalise = normalise,
         ),
         mnemonic = "GrypeScan",
         progress_message = "Scanning for vulnerabilities (%s) for %s" % (format, ctx.label),
@@ -227,6 +262,7 @@ grype_scan = rule(
     outputs = _report_output,
     toolchains = [
         config_common.toolchain_type("@grype.bzl//grype:toolchain", mandatory = False),
+        config_common.toolchain_type(_JQ_TOOLCHAIN_TYPE, mandatory = True),
     ],
     doc = """Scan for vulnerabilities using Grype.
 
@@ -254,8 +290,6 @@ Example (scan image directly):
     ```
 """,
 )
-
-_JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
 # ---------- Rule & Macro: grype_test ----------
 #
