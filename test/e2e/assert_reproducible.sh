@@ -49,7 +49,7 @@ fi
 
 # grype returns equally-ranked matches in an order that varies run to run, so
 # the rule sorts them. Already-sorted is what that looks like from outside.
-if ! "${JQ}" -e '.matches == (.matches | sort_by([-(.vulnerability.risk // 0), tojson]))' "${REPORT}" >/dev/null 2>&1; then
+if ! "${JQ}" -e '.matches == (.matches | sort_by([-(.vulnerability.risk // 0), .vulnerability.id // "", .artifact.purl // "", .artifact.id // "", tojson]))' "${REPORT}" >/dev/null 2>&1; then
     fail "matches are not in the deterministic order the rule imposes"
 fi
 
