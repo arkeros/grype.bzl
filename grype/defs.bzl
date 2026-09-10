@@ -100,6 +100,36 @@ export GRYPE_DB_CACHE_DIR="{cache_dir}"
 
 _JQ_TOOLCHAIN_TYPE = "@jq.bzl//jq/toolchain:type"
 
+# What has to be taken out of a report, per format, for two builds of one
+# commit to produce the same bytes. Formats absent here are not normalised:
+# `table` is not JSON, and `cyclonedx-xml` and `sarif` have not been measured.
+_NORMALISERS = {
+    # grype returns equally-ranked matches in an order that varies between
+    # runs of the same command, and no --sort-by strategy settles it.
+    # Descending risk first, which is the order grype means to convey, then
+    # named fields. Named rather than `tojson` alone because `jq -S` rewrites
+    # key order on output, so a sort key derived from serialisation before
+    # that pass disagrees with the same expression evaluated on the file
+    # afterwards -- which is exactly what a reader checking the order does.
+    "json": "if .matches then .matches |= sort_by([-(.vulnerability.risk // 0), .vulnerability.id // \"\", .artifact.purl // \"\", .artifact.id // \"\", tojson]) else . end",
+
+    # CycloneDX carries three of its own, and GRYPE_TIMESTAMP reaches none of
+    # them: a fresh `serialNumber` per document, a `metadata.timestamp` off
+    # the wall clock, and a fresh `bom-ref` on every vulnerability. All three
+    # are optional in the schema, and a vulnerability's `bom-ref` is
+    # referenced by nothing else in the document, so dropping them leaves a
+    # valid BOM. Ordering varies too, and is settled after the volatile
+    # fields are gone so that the sort key is stable.
+    "cyclonedx-json": " | ".join([
+        "del(.serialNumber)",
+        "if .metadata then .metadata |= del(.timestamp) else . end",
+        "if .vulnerabilities then .vulnerabilities |= map(del(.\"bom-ref\")) else . end",
+        "if .components then .components |= sort_by([.\"bom-ref\" // \"\", .purl // \"\", .name // \"\", .version // \"\"]) else . end",
+        "if .vulnerabilities then .vulnerabilities |= sort_by([.id // \"\", ((.affects // []) | map(.ref // \"\") | sort | join(\",\"))]) else . end",
+        "if .dependencies then .dependencies |= sort_by([.ref // \"\"]) else . end",
+    ]),
+}
+
 def _grype_scan_impl(ctx):
     """Run grype vulnerability scan."""
     output = ctx.outputs.report
@@ -185,13 +215,12 @@ def _grype_scan_impl(ctx):
     jq = ctx.toolchains[_JQ_TOOLCHAIN_TYPE].jqinfo.bin
     tools = [grype]
     normalise = ""
-    if format == "json":
+    if format in _NORMALISERS:
         tools.append(jq)
         normalise = """
-{jq} -S 'if .matches then .matches |= sort_by([-(.vulnerability.risk // 0), tojson]) else . end' \
-    "{output}" > "{output}.sorted"
-mv "{output}.sorted" "{output}"
-""".format(jq = jq.path, output = output.path)
+{jq} -S '{filter}' "{output}" > "{output}.normalised"
+mv "{output}.normalised" "{output}"
+""".format(jq = jq.path, filter = _NORMALISERS[format], output = output.path)
 
     ctx.actions.run_shell(
         inputs = inputs,

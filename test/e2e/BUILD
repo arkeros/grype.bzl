@@ -25,3 +25,24 @@ sh_test(
         "@jq_toolchains//:resolved_toolchain",
     ],
 )
+
+grype_scan(
+    name = "cdx_report",
+    database = "@grype_db//:db",
+    format = "cyclonedx-json",
+    sbom = "sbom.json",
+)
+
+sh_test(
+    name = "cyclonedx_reproducible",
+    size = "large",
+    srcs = ["assert_cyclonedx_reproducible.sh"],
+    args = [
+        "$(location :cdx_report)",
+        "$(location @jq_toolchains//:resolved_toolchain)",
+    ],
+    data = [
+        ":cdx_report",
+        "@jq_toolchains//:resolved_toolchain",
+    ],
+)

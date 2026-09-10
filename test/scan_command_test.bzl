@@ -118,6 +118,33 @@ def _pinned_database_is_usable_impl(ctx):
 
 pinned_database_is_usable_test = analysistest.make(_pinned_database_is_usable_impl)
 
+def _cyclonedx_report_is_reproducible_impl(ctx):
+    env = analysistest.begin(ctx)
+    command = _scan_action(env)
+
+    # CycloneDX carries its own volatile fields, and `GRYPE_TIMESTAMP=false`
+    # reaches none of them -- that setting governs grype's native
+    # `descriptor.timestamp`. Measured across two runs of one command: a fresh
+    # `serialNumber`, a `metadata.timestamp` off the wall clock, and a fresh
+    # `bom-ref` on every one of the forty-two vulnerabilities.
+    for field in ["serialNumber", "timestamp", "bom-ref"]:
+        asserts.true(
+            env,
+            field in command,
+            "expected the CycloneDX %s to be normalised away: %s" % (field, command),
+        )
+
+    # Components and vulnerabilities also come back in a different order each
+    # run, so they are sorted once the volatile fields are gone.
+    asserts.true(
+        env,
+        "sort_by" in command,
+        "expected the CycloneDX arrays to be sorted: " + command,
+    )
+    return analysistest.end(env)
+
+cyclonedx_report_is_reproducible_test = analysistest.make(_cyclonedx_report_is_reproducible_impl)
+
 records_a_relative_image_path_test = analysistest.make(
     _records_a_relative_image_path_impl,
     # The scheme follows the output group the image target carries:
@@ -200,11 +227,24 @@ def scan_command_test_suite(name):
         target_under_test = ":pinned_db_scan_subject",
     )
 
+    grype_scan(
+        name = "cyclonedx_scan_subject",
+        format = "cyclonedx-json",
+        grype = "//test/testdata:fake_grype",
+        sbom = "//test/testdata:sbom.json",
+        tags = ["manual"],
+    )
+    cyclonedx_report_is_reproducible_test(
+        name = "cyclonedx_report_is_reproducible",
+        target_under_test = ":cyclonedx_scan_subject",
+    )
+
     native.test_suite(
         name = name,
         tests = [
             ":records_a_relative_source_path",
             ":reproducible_report",
             ":pinned_database_is_usable",
+            ":cyclonedx_report_is_reproducible",
         ] + image_tests,
     )
