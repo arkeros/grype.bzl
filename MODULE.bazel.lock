@@ -225,6 +225,37 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//grype:extensions.bzl%grype": {
+      "general": {
+        "bzlTransitiveDigest": "E69de1QsaTVlPLDE3A8bjoHGeN2y0nzhHkVjXsPB8rE=",
+        "usagesDigest": "fivvLU0ZJXuYMUTuWvypSQaOOzi4xKhz0pLWuGnv4ZA=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "grype_toolchains": {
+            "repoRuleId": "@@//grype:extensions.bzl%_grype_repo",
+            "attributes": {
+              "version": "0.105.0"
+            }
+          }
+        }
+      }
+    },
+    "//grype:extensions.bzl%grype_database": {
+      "general": {
+        "bzlTransitiveDigest": "E69de1QsaTVlPLDE3A8bjoHGeN2y0nzhHkVjXsPB8rE=",
+        "usagesDigest": "WG2wA1UU33kYPEXGb+9RQq9SoRpTtKHcgd8exPvsAH4=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "grype_db": {
+            "repoRuleId": "@@//grype:database.bzl%grype_database_archive",
+            "attributes": {
+              "url": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.3_2026-01-20T00:30:04Z_1768889878.tar.zst",
+              "sha256": "c96b7615e93b28c3f2d9df6d7b774d62a9b2c4a4f0bfd43a75d6d6b68e41b292"
+            }
+          }
+        }
+      }
+    },
     "@@buildifier_prebuilt+//:defs.bzl%buildifier_prebuilt_deps_extension": {
       "general": {
         "bzlTransitiveDigest": "u/i9PP+maGNppkHd1aTBEeOD4bynGUlbF5u5OLG5M64=",
