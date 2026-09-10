@@ -36,3 +36,37 @@ use_repo(
     go_deps,
     "com_github_bazelbuild_buildtools",
 )
+
+# ---------------------------------------------------------------------------
+# End-to-end test fixtures (//test/e2e): a real grype and a pinned database.
+#
+# dev_dependency, and reached only by the e2e test, so a consumer of this
+# module fetches neither. The database is 94 MB, which is why the assertions
+# that can be made without one are analysis tests instead.
+#
+# The database is pinned rather than "latest" on purpose: a report records
+# `descriptor.db.status.built` and a `captured` timestamp for each of its
+# twenty-six providers, so an unpinned database would make the expected
+# output drift daily.
+grype = use_extension("@grype.bzl//grype:extensions.bzl", "grype", dev_dependency = True)
+grype.toolchain(version = "0.105.0")
+use_repo(grype, "grype_toolchains")
+
+register_toolchains(
+    "@grype_toolchains//:all",
+    dev_dependency = True,
+)
+
+grype_database = use_extension("@grype.bzl//grype:extensions.bzl", "grype_database", dev_dependency = True)
+grype_database.database(
+    name = "grype_db",
+    sha256 = "c96b7615e93b28c3f2d9df6d7b774d62a9b2c4a4f0bfd43a75d6d6b68e41b292",
+    url = "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.3_2026-01-20T00:30:04Z_1768889878.tar.zst",
+)
+use_repo(grype_database, "grype_db")
+
+# jq, for the e2e assertions. `grype_scan` resolves the toolchain through the
+# module graph already; this makes the binary itself reachable as a data
+# dependency of a plain sh_test.
+jq_toolchains = use_extension("@jq.bzl//jq:extensions.bzl", "toolchains", dev_dependency = True)
+use_repo(jq_toolchains, "jq_toolchains")
