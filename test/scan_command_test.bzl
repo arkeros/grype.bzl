@@ -60,6 +60,46 @@ def _records_a_relative_image_path_impl(ctx):
     )
     return analysistest.end(env)
 
+def _reproducible_report_impl(ctx):
+    env = analysistest.begin(ctx)
+    command = _scan_action(env)
+
+    # A fresh `mktemp -d` per action is echoed back in the report under
+    # `descriptor.configuration.db.cache-dir`, so it alone makes two builds of
+    # one commit produce different bytes.
+    asserts.true(
+        env,
+        "mktemp" not in command,
+        "the database cache directory is a fresh mktemp, which the report " +
+        "records: " + command,
+    )
+    asserts.true(
+        env,
+        "GRYPE_DB_CACHE_DIR=\"bazel-out/" in command,
+        "expected a deterministic, execroot-relative cache directory: " + command,
+    )
+
+    # grype stamps `descriptor.timestamp` with the wall clock unless told not
+    # to. There is no flag; the config key is reachable as an environment
+    # variable.
+    asserts.true(
+        env,
+        "GRYPE_TIMESTAMP=false" in command,
+        "expected the report timestamp to be disabled: " + command,
+    )
+
+    # grype emits equally-ranked matches in an order that varies between runs
+    # of the same command, and no --sort-by strategy settles it, so the report
+    # is sorted after the fact.
+    asserts.true(
+        env,
+        "sort_by" in command,
+        "expected the matches to be sorted deterministically: " + command,
+    )
+    return analysistest.end(env)
+
+reproducible_report_test = analysistest.make(_reproducible_report_impl)
+
 records_a_relative_image_path_test = analysistest.make(
     _records_a_relative_image_path_impl,
     # The scheme follows the output group the image target carries:
@@ -116,7 +156,15 @@ def scan_command_test_suite(name):
         )
         image_tests.append(":" + test_name)
 
+    reproducible_report_test(
+        name = "reproducible_report",
+        target_under_test = ":scan_subject",
+    )
+
     native.test_suite(
         name = name,
-        tests = [":records_a_relative_source_path"] + image_tests,
+        tests = [
+            ":records_a_relative_source_path",
+            ":reproducible_report",
+        ] + image_tests,
     )
